@@ -1,0 +1,271 @@
+#!/usr/bin/env zsh
+#
+# zsh-ollama-completion
+#   AI-powered terminal command completion using Ollama
+#
+# Configuration (environment variables):
+#   ZSH_OLLAMA_MODEL        - Model name (default: qwen3:1.7B)
+#   ZSH_OLLAMA_HOST         - Ollama API URL (default: http://localhost:11434)
+#   ZSH_OLLAMA_DELAY        - Seconds of idle before triggering completion (default: 3)
+#   ZSH_OLLAMA_HISTORY_SIZE - Number of history entries for context (default: 500)
+#   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 64)
+#   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
+#   ZSH_OLLAMA_ENABLED      - Set to 0 to disable (default: 1)
+#
+# Usage:
+#   source zsh-ollama-completion.plugin.zsh
+#   After 3 seconds of idle, a ghost-text suggestion appears in gray.
+#   Press Ctrl-F to accept the suggestion. Any other key dismisses it.
+
+# --- Internal state ---
+typeset -g _ollama_suggestion=""
+typeset -g _ollama_timer_pid=0
+typeset -g _ollama_result_file=""
+typeset -g _ollama_fd=""
+typeset -g _ollama_last_buffer=""
+typeset -g _ollama_initialized=0
+
+# --- JSON string escaping (pure zsh implementation) ---
+_ollama_json_escape() {
+    local str="$1"
+    str="${str//\\/\\\\}"
+    str="${str//\"/\\\"}"
+    str="${str//$'\n'/\\n}"
+    str="${str//$'\r'/\\r}"
+    str="${str//$'\t'/\\t}"
+    printf '%s' "$str"
+}
+
+# --- Extract content field from Ollama API response ---
+_ollama_extract_content() {
+    local json="$1"
+    if command -v jq &>/dev/null; then
+        printf '%s' "$json" | jq -r '.message.content // empty' 2>/dev/null
+    elif command -v python3 &>/dev/null; then
+        printf '%s' "$json" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('message', {}).get('content', ''), end='')
+except:
+    pass
+" 2>/dev/null
+    else
+        # Fallback: basic extraction without jq or python3
+        printf '%s' "$json" | grep -oP '"content"\s*:\s*"\K([^"\\]|\\.)*' | head -1
+    fi
+}
+
+# --- Strip <think>...</think> blocks (for models like qwen3) ---
+_ollama_strip_think() {
+    local text="$1"
+    # Use sed address range to delete all lines between <think> and </think>
+    printf '%s\n' "$text" | sed '/<think>/,/<\/think>/d'
+}
+
+# --- Initialization ---
+_ollama_comp_init() {
+    (( _ollama_initialized )) && return
+
+    _ollama_result_file=$(mktemp "${TMPDIR:-/tmp}/ollama-comp.XXXXXX")
+
+    local pipe_path
+    pipe_path=$(mktemp -u "${TMPDIR:-/tmp}/ollama-pipe.XXXXXX")
+    mkfifo "$pipe_path"
+    exec {_ollama_fd}<>"$pipe_path"
+    rm -f "$pipe_path"
+
+    zle -F "$_ollama_fd" _ollama_handle_response
+
+    _ollama_initialized=1
+}
+
+# --- Cleanup ---
+_ollama_comp_cleanup() {
+    _ollama_kill_timer
+
+    if [[ -n "$_ollama_fd" ]]; then
+        zle -F "$_ollama_fd" 2>/dev/null
+        exec {_ollama_fd}>&- 2>/dev/null
+        _ollama_fd=""
+    fi
+
+    [[ -f "$_ollama_result_file" ]] && rm -f "$_ollama_result_file"
+
+    _ollama_initialized=0
+}
+
+# --- Kill the background timer process ---
+_ollama_kill_timer() {
+    if (( _ollama_timer_pid > 0 )); then
+        kill "$_ollama_timer_pid" 2>/dev/null
+        _ollama_timer_pid=0
+    fi
+}
+
+# --- Clear the displayed suggestion ---
+_ollama_clear_suggestion() {
+    if [[ -n "$_ollama_suggestion" ]]; then
+        _ollama_suggestion=""
+        POSTDISPLAY=""
+        # Remove region_highlight entries containing fg=8
+        region_highlight=("${(@)region_highlight:#*fg=8*}")
+    fi
+}
+
+# --- Async response handler (zle -F callback) ---
+_ollama_handle_response() {
+    local line
+    if read -r line <&$1 2>/dev/null; then
+        if [[ "$line" == "done" && -f "$_ollama_result_file" ]]; then
+            local suggestion
+            suggestion=$(<"$_ollama_result_file")
+
+            # Strip think blocks
+            suggestion=$(_ollama_strip_think "$suggestion")
+
+            # Trim leading/trailing whitespace and newlines
+            suggestion="${suggestion#"${suggestion%%[! $'\n'$'\r'$'\t']*}"}"
+            suggestion="${suggestion%"${suggestion##*[! $'\n'$'\r'$'\t']}"}"
+
+            # Replace newlines with spaces for single-line display
+            suggestion="${suggestion//$'\n'/ }"
+
+            if [[ -n "$suggestion" ]]; then
+                _ollama_suggestion="$suggestion"
+                POSTDISPLAY="${_ollama_suggestion}"
+                region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
+                zle -R
+            fi
+        fi
+    fi
+}
+
+# --- Send completion request ---
+_ollama_request_completion() {
+    [[ "${ZSH_OLLAMA_ENABLED:-1}" == "0" ]] && return
+
+    local buffer="$BUFFER"
+    [[ -z "$buffer" || ${#buffer} -lt 2 ]] && return
+
+    _ollama_kill_timer
+    _ollama_clear_suggestion
+
+    local model="${ZSH_OLLAMA_MODEL:-qwen3:1.7B}"
+    local host="${ZSH_OLLAMA_HOST:-http://localhost:11434}"
+    local delay="${ZSH_OLLAMA_DELAY:-3}"
+    local hist_size="${ZSH_OLLAMA_HISTORY_SIZE:-500}"
+    local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-64}"
+    local temperature="${ZSH_OLLAMA_TEMPERATURE:-0.3}"
+    local result_file="$_ollama_result_file"
+    local fd="$_ollama_fd"
+    local cwd="$PWD"
+
+    {
+        trap 'exit 0' TERM INT HUP
+
+        sleep "$delay" &
+        local sleep_pid=$!
+        wait $sleep_pid 2>/dev/null || exit 0
+
+        # Collect recent shell history
+        local history_lines
+        history_lines=$(fc -l -n -"$hist_size" 2>/dev/null)
+
+        # Build system prompt
+        local system_prompt="You are a terminal command completion engine. The user is in: ${cwd}
+Given their shell history and current partial input, predict the REST of the command.
+Rules:
+- Output ONLY the remaining text to complete the command
+- Do NOT repeat the text already typed
+- Do NOT include explanations, markdown, quotes, or backticks
+- Do NOT output multiple alternatives
+- Keep it concise and practical
+- If no reasonable completion exists, output nothing"
+
+        local escaped_system
+        escaped_system=$(_ollama_json_escape "$system_prompt")
+
+        # Build user prompt
+        local user_prompt
+        user_prompt="Recent shell history:
+${history_lines}
+
+Current partial input: ${buffer}
+
+Complete the above (output only the remaining part):"
+
+        local escaped_user
+        escaped_user=$(_ollama_json_escape "$user_prompt")
+
+        # Build JSON payload
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_user}\"}],\"stream\":false,\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+
+        # Call Ollama API
+        local response
+        response=$(curl -s --max-time 10 "${host}/api/chat" -d "$payload" 2>/dev/null)
+
+        if [[ $? -eq 0 && -n "$response" ]]; then
+            local content
+            content=$(_ollama_extract_content "$response")
+
+            if [[ -n "$content" ]]; then
+                printf '%s' "$content" > "$result_file"
+                echo "done" >&$fd 2>/dev/null
+            fi
+        fi
+    } &!
+
+    _ollama_timer_pid=$!
+}
+
+# --- ZLE hook: detect buffer changes ---
+_ollama_line_pre_redraw() {
+    [[ "${ZSH_OLLAMA_ENABLED:-1}" == "0" ]] && return
+    (( ! _ollama_initialized )) && return
+
+    if [[ "$BUFFER" != "$_ollama_last_buffer" ]]; then
+        _ollama_last_buffer="$BUFFER"
+        if [[ -n "$BUFFER" ]]; then
+            _ollama_request_completion
+        else
+            _ollama_kill_timer
+            _ollama_clear_suggestion
+        fi
+    fi
+}
+
+# --- Ctrl-F: accept suggestion or forward-char ---
+_ollama_accept_or_forward_char() {
+    if [[ -n "$_ollama_suggestion" ]]; then
+        BUFFER="${BUFFER}${_ollama_suggestion}"
+        CURSOR=${#BUFFER}
+        _ollama_clear_suggestion
+        _ollama_last_buffer="$BUFFER"
+    else
+        zle forward-char
+    fi
+}
+
+# --- Plugin setup ---
+
+# Register widget
+zle -N _ollama_accept_or_forward_char
+
+# Bind Ctrl-F to accept suggestion
+bindkey '^F' _ollama_accept_or_forward_char
+
+# Register line-pre-redraw hook (requires zsh 5.3+)
+autoload -Uz add-zle-hook-widget
+add-zle-hook-widget line-pre-redraw _ollama_line_pre_redraw
+
+# Initialize on first prompt
+_ollama_precmd_init() {
+    _ollama_comp_init
+    add-zsh-hook -d precmd _ollama_precmd_init
+}
+autoload -Uz add-zsh-hook
+add-zsh-hook precmd _ollama_precmd_init
+
+# Cleanup on shell exit
+add-zsh-hook zshexit _ollama_comp_cleanup
