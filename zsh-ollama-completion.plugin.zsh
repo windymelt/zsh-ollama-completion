@@ -260,12 +260,13 @@ ${history_lines}")
         _ollama_debug "calling API: ${host}/api/chat model=$model"
         local response
         response=$(curl -s --max-time "$timeout" "${host}/api/chat" -d "$payload" 2>/dev/null)
+        local curl_status=$?
 
         # Stop spinner
         kill $spinner_pid 2>/dev/null
         wait $spinner_pid 2>/dev/null
 
-        if [[ $? -eq 0 && -n "$response" ]]; then
+        if [[ $curl_status -eq 0 && -n "$response" ]]; then
             local content
             content=$(_ollama_extract_content "$response")
             _ollama_debug "API response content: $content"
