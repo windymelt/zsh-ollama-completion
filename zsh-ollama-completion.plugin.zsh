@@ -23,6 +23,7 @@
 
 # --- Internal state ---
 typeset -g _ollama_suggestion=""
+typeset -g _ollama_full_command=""
 typeset -g _ollama_timer_pid=0
 typeset -g _ollama_result_file=""
 typeset -g _ollama_fd=""
@@ -118,37 +119,40 @@ _ollama_kill_timer() {
 _ollama_clear_suggestion() {
     if [[ -n "$_ollama_suggestion" ]]; then
         _ollama_suggestion=""
+        _ollama_full_command=""
         POSTDISPLAY=""
         # Remove region_highlight entries containing fg=8
         region_highlight=("${(@)region_highlight:#*fg=8*}")
     fi
 }
 
-# --- Strip overlap between buffer and suggestion ---
-# If the model returns a full command instead of just the remaining part,
-# remove the prefix that overlaps with the current buffer.
-_ollama_strip_overlap() {
+# --- Resolve the full intended command from model output ---
+# The model may return either the full command or just the remaining part.
+# This function always returns the complete command to replace the buffer with.
+_ollama_resolve_full_command() {
     local buffer="$1" suggestion="$2"
 
-    # Case 1: suggestion starts with the full buffer content
+    # Case 1: suggestion starts with the full buffer content -> it IS the full command
     if [[ "$suggestion" == "$buffer"* ]]; then
-        printf '%s' "${suggestion#"$buffer"}"
+        _ollama_debug "model returned full command"
+        printf '%s' "$suggestion"
         return
     fi
 
     # Case 2: find the longest suffix of buffer that is a prefix of suggestion
-    # e.g. buffer="git sta", suggestion="status" -> overlap="sta", result="tus"
+    # e.g. buffer="git sta", suggestion="status" -> full command is "git status"
     local i
     for (( i=1; i<${#buffer}; i++ )); do
         local suffix="${buffer:$i}"
         if [[ "$suggestion" == "$suffix"* ]]; then
             _ollama_debug "overlap detected: buffer suffix='$suffix'"
-            printf '%s' "${suggestion#"$suffix"}"
+            printf '%s' "${buffer}${suggestion#"$suffix"}"
             return
         fi
     done
 
-    printf '%s' "$suggestion"
+    # Case 3: no overlap -> append suggestion to buffer
+    printf '%s' "${buffer}${suggestion}"
 }
 
 # --- Async response handler (zle -F callback) ---
@@ -169,12 +173,16 @@ _ollama_handle_response() {
             # Replace newlines with spaces for single-line display
             suggestion="${suggestion//$'\n'/ }"
 
-            # Remove overlap with current buffer
-            suggestion=$(_ollama_strip_overlap "$BUFFER" "$suggestion")
+            # Resolve full command and compute display text
+            local full_command
+            full_command=$(_ollama_resolve_full_command "$BUFFER" "$suggestion")
+            local display_text="${full_command#"$BUFFER"}"
 
-            if [[ -n "$suggestion" ]]; then
-                _ollama_debug "suggestion received: $suggestion"
-                _ollama_suggestion="$suggestion"
+            if [[ -n "$display_text" ]]; then
+                _ollama_debug "full command: $full_command"
+                _ollama_debug "display text: $display_text"
+                _ollama_full_command="$full_command"
+                _ollama_suggestion="$display_text"
                 POSTDISPLAY="${_ollama_suggestion}"
                 region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
                 zle -R
@@ -276,8 +284,8 @@ _ollama_line_pre_redraw() {
 # --- Ctrl-F: accept suggestion or forward-char ---
 _ollama_accept_or_forward_char() {
     if [[ -n "$_ollama_suggestion" ]]; then
-        _ollama_debug "accepted suggestion: $_ollama_suggestion"
-        BUFFER="${BUFFER}${_ollama_suggestion}"
+        _ollama_debug "accepted: $_ollama_full_command"
+        BUFFER="$_ollama_full_command"
         CURSOR=${#BUFFER}
         _ollama_clear_suggestion
         _ollama_last_buffer="$BUFFER"
