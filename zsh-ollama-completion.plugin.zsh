@@ -13,6 +13,7 @@
 #   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
 #   ZSH_OLLAMA_ACCEPT_KEY   - Key binding to accept suggestion (default: ^F)
 #   ZSH_OLLAMA_TIMEOUT      - API request timeout in seconds (default: 10)
+#   ZSH_OLLAMA_THINK        - Set to 0 to disable model thinking (default: 1)
 #   ZSH_OLLAMA_DEBUG        - Set to 1 to enable debug logging to stderr (default: 0)
 #
 # Usage:
@@ -29,6 +30,9 @@ typeset -g _ollama_result_file=""
 typeset -g _ollama_fd=""
 typeset -g _ollama_last_buffer=""
 typeset -g _ollama_initialized=0
+typeset -g _ollama_spinner_frame=0
+typeset -g _ollama_spinning=0
+typeset -ga _ollama_spinner_chars=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
 
 # --- Debug logging ---
 _ollama_debug() {
@@ -115,51 +119,39 @@ _ollama_kill_timer() {
     fi
 }
 
-# --- Clear the displayed suggestion ---
+# --- Clear the displayed suggestion and spinner ---
 _ollama_clear_suggestion() {
-    if [[ -n "$_ollama_suggestion" ]]; then
+    if [[ -n "$_ollama_suggestion" || $_ollama_spinning -eq 1 ]]; then
         _ollama_suggestion=""
         _ollama_full_command=""
+        _ollama_spinning=0
+        _ollama_spinner_frame=0
         POSTDISPLAY=""
         # Remove region_highlight entries containing fg=8
         region_highlight=("${(@)region_highlight:#*fg=8*}")
     fi
 }
 
-# --- Resolve the full intended command from model output ---
-# The model may return either the full command or just the remaining part.
-# This function always returns the complete command to replace the buffer with.
-_ollama_resolve_full_command() {
-    local buffer="$1" suggestion="$2"
-
-    # Case 1: suggestion starts with the full buffer content -> it IS the full command
-    if [[ "$suggestion" == "$buffer"* ]]; then
-        _ollama_debug "model returned full command"
-        printf '%s' "$suggestion"
-        return
-    fi
-
-    # Case 2: find the longest suffix of buffer that is a prefix of suggestion
-    # e.g. buffer="git sta", suggestion="status" -> full command is "git status"
-    local i
-    for (( i=1; i<${#buffer}; i++ )); do
-        local suffix="${buffer:$i}"
-        if [[ "$suggestion" == "$suffix"* ]]; then
-            _ollama_debug "overlap detected: buffer suffix='$suffix'"
-            printf '%s' "${buffer}${suggestion#"$suffix"}"
-            return
-        fi
-    done
-
-    # Case 3: no overlap -> append suggestion to buffer
-    printf '%s' "${buffer}${suggestion}"
-}
-
 # --- Async response handler (zle -F callback) ---
 _ollama_handle_response() {
     local line
     if read -r line <&$1 2>/dev/null; then
-        if [[ "$line" == "done" && -f "$_ollama_result_file" ]]; then
+        if [[ "$line" == "spin" ]]; then
+            # Update spinner display
+            _ollama_spinning=1
+            region_highlight=("${(@)region_highlight:#*fg=8*}")
+            local idx=$(( (_ollama_spinner_frame % ${#_ollama_spinner_chars[@]}) + 1 ))
+            local char="${_ollama_spinner_chars[$idx]}"
+            POSTDISPLAY=" $char"
+            region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=8")
+            zle -R
+            (( _ollama_spinner_frame++ ))
+        elif [[ "$line" == "done" && -f "$_ollama_result_file" ]]; then
+            # Clear spinner state
+            _ollama_spinning=0
+            _ollama_spinner_frame=0
+            region_highlight=("${(@)region_highlight:#*fg=8*}")
+
             local suggestion
             suggestion=$(<"$_ollama_result_file")
 
@@ -173,21 +165,21 @@ _ollama_handle_response() {
             # Replace newlines with spaces for single-line display
             suggestion="${suggestion//$'\n'/ }"
 
-            # Resolve full command and compute display text
-            local full_command
-            full_command=$(_ollama_resolve_full_command "$BUFFER" "$suggestion")
-            local display_text="${full_command#"$BUFFER"}"
+            # Model returns the full command; compute ghost text to display
+            local display_text="${suggestion#"$BUFFER"}"
 
-            if [[ -n "$display_text" ]]; then
-                _ollama_debug "full command: $full_command"
+            if [[ -n "$display_text" && "$suggestion" != "$BUFFER" ]]; then
+                _ollama_debug "full command: $suggestion"
                 _ollama_debug "display text: $display_text"
-                _ollama_full_command="$full_command"
+                _ollama_full_command="$suggestion"
                 _ollama_suggestion="$display_text"
                 POSTDISPLAY="${_ollama_suggestion}"
                 region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
                 zle -R
             else
                 _ollama_debug "empty suggestion after processing"
+                POSTDISPLAY=""
+                zle -R
             fi
         fi
     fi
@@ -217,20 +209,31 @@ _ollama_request_completion() {
     _ollama_debug "requesting completion: buffer='$buffer' model=$model delay=$delay"
 
     {
-        trap 'exit 0' TERM INT HUP
+        local spinner_pid=0
+        trap 'kill $spinner_pid 2>/dev/null; exit 0' TERM INT HUP
 
         sleep "$delay" &
         local sleep_pid=$!
         wait $sleep_pid 2>/dev/null || exit 0
 
+        # Start spinner
+        {
+            while true; do
+                echo "spin" >&$fd 2>/dev/null || exit 0
+                sleep 0.2
+            done
+        } &
+        spinner_pid=$!
+
         # Collect recent shell history
         local history_lines
         history_lines=$(fc -l -n -"$hist_size" 2>/dev/null)
 
-        # Build system prompt with few-shot examples in chat history
-        local system_prompt="Autocomplete shell commands. The user is in: ${cwd}
-When given a partial command, respond with ONLY the remaining text needed to complete it.
-Do not repeat what was already typed. Do not add explanations or markdown.
+        # Build system prompt
+        local system_prompt="You are a shell command autocomplete engine. The user is in: ${cwd}
+Given a partial command, output the COMPLETE command that the user most likely wants to run.
+Always output the full command from the beginning, including what was already typed.
+Do not add explanations or markdown. Output only the command itself.
 Recent shell history for context:
 ${history_lines}"
 
@@ -239,12 +242,20 @@ ${history_lines}"
         escaped_buffer=$(_ollama_json_escape "$buffer")
 
         # Build JSON payload with few-shot examples as chat turns
-        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"it\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"se up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false,\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+        local think_param=""
+        if [[ "${ZSH_OLLAMA_THINK:-1}" == "0" ]]; then
+            think_param=",\"think\":false"
+        fi
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
         _ollama_debug "calling API: ${host}/api/chat model=$model"
         local response
         response=$(curl -s --max-time "$timeout" "${host}/api/chat" -d "$payload" 2>/dev/null)
+
+        # Stop spinner
+        kill $spinner_pid 2>/dev/null
+        wait $spinner_pid 2>/dev/null
 
         if [[ $? -eq 0 && -n "$response" ]]; then
             local content

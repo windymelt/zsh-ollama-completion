@@ -67,6 +67,7 @@ All configuration is done via environment variables. Set them in your `.zshrc` b
 | `ZSH_OLLAMA_TEMPERATURE` | `0.3` | Sampling temperature |
 | `ZSH_OLLAMA_TIMEOUT` | `10` | API request timeout in seconds |
 | `ZSH_OLLAMA_ACCEPT_KEY` | `^F` | Key binding to accept suggestion |
+| `ZSH_OLLAMA_THINK` | `1` | Set to `0` to disable model thinking (faster, lower quality) |
 | `ZSH_OLLAMA_DEBUG` | `0` | Set to `1` to enable debug logging to stderr |
 
 ### Example `.zshrc`
