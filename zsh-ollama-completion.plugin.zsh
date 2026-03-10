@@ -12,6 +12,8 @@
 #   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
 #   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
 #   ZSH_OLLAMA_ACCEPT_KEY   - Key binding to accept suggestion (default: ^F)
+#   ZSH_OLLAMA_TIMEOUT      - API request timeout in seconds (default: 10)
+#   ZSH_OLLAMA_DEBUG        - Set to 1 to enable debug logging to stderr (default: 0)
 #
 # Usage:
 #   export ZSH_OLLAMA_ENABLED=1
@@ -26,6 +28,11 @@ typeset -g _ollama_result_file=""
 typeset -g _ollama_fd=""
 typeset -g _ollama_last_buffer=""
 typeset -g _ollama_initialized=0
+
+# --- Debug logging ---
+_ollama_debug() {
+    [[ "${ZSH_OLLAMA_DEBUG:-0}" == "1" ]] && printf '[ollama-completion] %s\n' "$*" >&2
+}
 
 # --- JSON string escaping (pure zsh implementation) ---
 _ollama_json_escape() {
@@ -80,6 +87,7 @@ _ollama_comp_init() {
     zle -F "$_ollama_fd" _ollama_handle_response
 
     _ollama_initialized=1
+    _ollama_debug "initialized: fd=$_ollama_fd result_file=$_ollama_result_file"
 }
 
 # --- Cleanup ---
@@ -95,6 +103,7 @@ _ollama_comp_cleanup() {
     [[ -f "$_ollama_result_file" ]] && rm -f "$_ollama_result_file"
 
     _ollama_initialized=0
+    _ollama_debug "cleaned up"
 }
 
 # --- Kill the background timer process ---
@@ -134,10 +143,13 @@ _ollama_handle_response() {
             suggestion="${suggestion//$'\n'/ }"
 
             if [[ -n "$suggestion" ]]; then
+                _ollama_debug "suggestion received: $suggestion"
                 _ollama_suggestion="$suggestion"
                 POSTDISPLAY="${_ollama_suggestion}"
                 region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
                 zle -R
+            else
+                _ollama_debug "empty suggestion after processing"
             fi
         fi
     fi
@@ -159,9 +171,12 @@ _ollama_request_completion() {
     local hist_size="${ZSH_OLLAMA_HISTORY_SIZE:-500}"
     local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-64}"
     local temperature="${ZSH_OLLAMA_TEMPERATURE:-0.3}"
+    local timeout="${ZSH_OLLAMA_TIMEOUT:-10}"
     local result_file="$_ollama_result_file"
     local fd="$_ollama_fd"
     local cwd="$PWD"
+
+    _ollama_debug "requesting completion: buffer='$buffer' model=$model delay=$delay"
 
     {
         trap 'exit 0' TERM INT HUP
@@ -204,17 +219,23 @@ Complete the above (output only the remaining part):"
         local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_user}\"}],\"stream\":false,\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
+        _ollama_debug "calling API: ${host}/api/chat model=$model"
         local response
-        response=$(curl -s --max-time 10 "${host}/api/chat" -d "$payload" 2>/dev/null)
+        response=$(curl -s --max-time "$timeout" "${host}/api/chat" -d "$payload" 2>/dev/null)
 
         if [[ $? -eq 0 && -n "$response" ]]; then
             local content
             content=$(_ollama_extract_content "$response")
+            _ollama_debug "API response content: $content"
 
             if [[ -n "$content" ]]; then
                 printf '%s' "$content" > "$result_file"
                 echo "done" >&$fd 2>/dev/null
+            else
+                _ollama_debug "API returned empty content"
             fi
+        else
+            _ollama_debug "API call failed or returned empty response"
         fi
     } &!
 
@@ -240,6 +261,7 @@ _ollama_line_pre_redraw() {
 # --- Ctrl-F: accept suggestion or forward-char ---
 _ollama_accept_or_forward_char() {
     if [[ -n "$_ollama_suggestion" ]]; then
+        _ollama_debug "accepted suggestion: $_ollama_suggestion"
         BUFFER="${BUFFER}${_ollama_suggestion}"
         CURSOR=${#BUFFER}
         _ollama_clear_suggestion
