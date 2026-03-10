@@ -39,15 +39,23 @@ _ollama_debug() {
     [[ "${ZSH_OLLAMA_DEBUG:-0}" == "1" ]] && printf '[ollama-completion] %s\n' "$*" >&2
 }
 
-# --- JSON string escaping (pure zsh implementation) ---
+# --- JSON string escaping ---
 _ollama_json_escape() {
     local str="$1"
-    str="${str//\\/\\\\}"
-    str="${str//\"/\\\"}"
-    str="${str//$'\n'/\\n}"
-    str="${str//$'\r'/\\r}"
-    str="${str//$'\t'/\\t}"
-    printf '%s' "$str"
+    if command -v jq &>/dev/null; then
+        # jq -Rs outputs "quoted string"; strip surrounding quotes
+        local quoted
+        quoted=$(printf '%s' "$str" | jq -Rs .)
+        printf '%s' "${quoted:1:-1}"
+    else
+        # Pure zsh fallback
+        str="${str//\\/\\\\}"
+        str="${str//\"/\\\"}"
+        str="${str//$'\n'/\\n}"
+        str="${str//$'\r'/\\r}"
+        str="${str//$'\t'/\\t}"
+        printf '%s' "$str"
+    fi
 }
 
 # --- Extract content field from Ollama API response ---
