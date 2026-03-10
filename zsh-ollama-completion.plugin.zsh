@@ -237,24 +237,30 @@ _ollama_request_completion() {
         local history_lines
         history_lines=$(fc -l -n -"$hist_size" 2>/dev/null)
 
+        # Collect file listing of current directory
+        local file_list
+        file_list=$(ls -1 "$cwd" 2>/dev/null | head -100)
+
         # Build system prompt
         local system_prompt="You are a shell command autocomplete engine. The user is in: ${cwd}
 Given a partial command, output the COMPLETE command that the user most likely wants to run.
 Always output the full command from the beginning, including what was already typed.
 Do not add explanations or markdown. Output only the command itself."
 
-        local escaped_system escaped_buffer escaped_history
+        local escaped_system escaped_buffer escaped_history escaped_files
         escaped_system=$(_ollama_json_escape "$system_prompt")
         escaped_buffer=$(_ollama_json_escape "$buffer")
         escaped_history=$(_ollama_json_escape "My recent shell history:
 ${history_lines}")
+        escaped_files=$(_ollama_json_escape "Files in current directory:
+${file_list}")
 
         # Build JSON payload with few-shot examples as chat turns
         local think_param=""
         if [[ "${ZSH_OLLAMA_THINK:-1}" == "0" ]]; then
             think_param=",\"think\":false"
         fi
-        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood. I will use your history as context for completions.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"${escaped_files}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
         _ollama_debug "calling API: ${host}/api/chat model=$model"
