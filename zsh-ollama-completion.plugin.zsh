@@ -11,6 +11,7 @@
 #   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 64)
 #   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
 #   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
+#   ZSH_OLLAMA_ACCEPT_KEY   - Key binding to accept suggestion (default: ^F)
 #
 # Usage:
 #   export ZSH_OLLAMA_ENABLED=1
@@ -253,8 +254,8 @@ _ollama_accept_or_forward_char() {
 # Register widget
 zle -N _ollama_accept_or_forward_char
 
-# Bind Ctrl-F to accept suggestion
-bindkey '^F' _ollama_accept_or_forward_char
+# Bind accept key (default: Ctrl-F)
+bindkey "${ZSH_OLLAMA_ACCEPT_KEY:-'^F'}" _ollama_accept_or_forward_char
 
 # Register line-pre-redraw hook (requires zsh 5.3+)
 autoload -Uz add-zle-hook-widget
