@@ -10,9 +10,10 @@
 #   ZSH_OLLAMA_HISTORY_SIZE - Number of history entries for context (default: 500)
 #   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 64)
 #   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
-#   ZSH_OLLAMA_ENABLED      - Set to 0 to disable (default: 1)
+#   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
 #
 # Usage:
+#   export ZSH_OLLAMA_ENABLED=1
 #   source zsh-ollama-completion.plugin.zsh
 #   After 3 seconds of idle, a ghost-text suggestion appears in gray.
 #   Press Ctrl-F to accept the suggestion. Any other key dismisses it.
@@ -143,7 +144,7 @@ _ollama_handle_response() {
 
 # --- Send completion request ---
 _ollama_request_completion() {
-    [[ "${ZSH_OLLAMA_ENABLED:-1}" == "0" ]] && return
+    [[ "${ZSH_OLLAMA_ENABLED:-0}" == "0" ]] && return
 
     local buffer="$BUFFER"
     [[ -z "$buffer" || ${#buffer} -lt 2 ]] && return
@@ -221,7 +222,7 @@ Complete the above (output only the remaining part):"
 
 # --- ZLE hook: detect buffer changes ---
 _ollama_line_pre_redraw() {
-    [[ "${ZSH_OLLAMA_ENABLED:-1}" == "0" ]] && return
+    [[ "${ZSH_OLLAMA_ENABLED:-0}" == "0" ]] && return
     (( ! _ollama_initialized )) && return
 
     if [[ "$BUFFER" != "$_ollama_last_buffer" ]]; then
