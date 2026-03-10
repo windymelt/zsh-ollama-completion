@@ -63,7 +63,7 @@ All configuration is done via environment variables. Set them in your `.zshrc` b
 | `ZSH_OLLAMA_HOST` | `http://localhost:11434` | Ollama API URL |
 | `ZSH_OLLAMA_DELAY` | `3` | Seconds of idle before triggering completion |
 | `ZSH_OLLAMA_HISTORY_SIZE` | `500` | Number of history entries sent as context |
-| `ZSH_OLLAMA_NUM_PREDICT` | `64` | Max tokens to generate |
+| `ZSH_OLLAMA_NUM_PREDICT` | `1024` | Max tokens to generate |
 | `ZSH_OLLAMA_TEMPERATURE` | `0.3` | Sampling temperature |
 | `ZSH_OLLAMA_TIMEOUT` | `10` | API request timeout in seconds |
 | `ZSH_OLLAMA_ACCEPT_KEY` | `^F` | Key binding to accept suggestion |

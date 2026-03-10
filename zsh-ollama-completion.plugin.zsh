@@ -8,7 +8,7 @@
 #   ZSH_OLLAMA_HOST         - Ollama API URL (default: http://localhost:11434)
 #   ZSH_OLLAMA_DELAY        - Seconds of idle before triggering completion (default: 3)
 #   ZSH_OLLAMA_HISTORY_SIZE - Number of history entries for context (default: 500)
-#   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 64)
+#   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 1024)
 #   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
 #   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
 #   ZSH_OLLAMA_ACCEPT_KEY   - Key binding to accept suggestion (default: ^F)
@@ -124,6 +124,33 @@ _ollama_clear_suggestion() {
     fi
 }
 
+# --- Strip overlap between buffer and suggestion ---
+# If the model returns a full command instead of just the remaining part,
+# remove the prefix that overlaps with the current buffer.
+_ollama_strip_overlap() {
+    local buffer="$1" suggestion="$2"
+
+    # Case 1: suggestion starts with the full buffer content
+    if [[ "$suggestion" == "$buffer"* ]]; then
+        printf '%s' "${suggestion#"$buffer"}"
+        return
+    fi
+
+    # Case 2: find the longest suffix of buffer that is a prefix of suggestion
+    # e.g. buffer="git sta", suggestion="status" -> overlap="sta", result="tus"
+    local i
+    for (( i=1; i<${#buffer}; i++ )); do
+        local suffix="${buffer:$i}"
+        if [[ "$suggestion" == "$suffix"* ]]; then
+            _ollama_debug "overlap detected: buffer suffix='$suffix'"
+            printf '%s' "${suggestion#"$suffix"}"
+            return
+        fi
+    done
+
+    printf '%s' "$suggestion"
+}
+
 # --- Async response handler (zle -F callback) ---
 _ollama_handle_response() {
     local line
@@ -141,6 +168,9 @@ _ollama_handle_response() {
 
             # Replace newlines with spaces for single-line display
             suggestion="${suggestion//$'\n'/ }"
+
+            # Remove overlap with current buffer
+            suggestion=$(_ollama_strip_overlap "$BUFFER" "$suggestion")
 
             if [[ -n "$suggestion" ]]; then
                 _ollama_debug "suggestion received: $suggestion"
@@ -169,7 +199,7 @@ _ollama_request_completion() {
     local host="${ZSH_OLLAMA_HOST:-http://localhost:11434}"
     local delay="${ZSH_OLLAMA_DELAY:-3}"
     local hist_size="${ZSH_OLLAMA_HISTORY_SIZE:-500}"
-    local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-64}"
+    local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-1024}"
     local temperature="${ZSH_OLLAMA_TEMPERATURE:-0.3}"
     local timeout="${ZSH_OLLAMA_TIMEOUT:-10}"
     local result_file="$_ollama_result_file"
@@ -189,34 +219,19 @@ _ollama_request_completion() {
         local history_lines
         history_lines=$(fc -l -n -"$hist_size" 2>/dev/null)
 
-        # Build system prompt
-        local system_prompt="You are a terminal command completion engine. The user is in: ${cwd}
-Given their shell history and current partial input, predict the REST of the command.
-Rules:
-- Output ONLY the remaining text to complete the command
-- Do NOT repeat the text already typed
-- Do NOT include explanations, markdown, quotes, or backticks
-- Do NOT output multiple alternatives
-- Keep it concise and practical
-- If no reasonable completion exists, output nothing"
+        # Build system prompt with few-shot examples in chat history
+        local system_prompt="Autocomplete shell commands. The user is in: ${cwd}
+When given a partial command, respond with ONLY the remaining text needed to complete it.
+Do not repeat what was already typed. Do not add explanations or markdown.
+Recent shell history for context:
+${history_lines}"
 
-        local escaped_system
+        local escaped_system escaped_buffer
         escaped_system=$(_ollama_json_escape "$system_prompt")
+        escaped_buffer=$(_ollama_json_escape "$buffer")
 
-        # Build user prompt
-        local user_prompt
-        user_prompt="Recent shell history:
-${history_lines}
-
-Current partial input: ${buffer}
-
-Complete the above (output only the remaining part):"
-
-        local escaped_user
-        escaped_user=$(_ollama_json_escape "$user_prompt")
-
-        # Build JSON payload
-        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_user}\"}],\"stream\":false,\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+        # Build JSON payload with few-shot examples as chat turns
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"it\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"se up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false,\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
         _ollama_debug "calling API: ${host}/api/chat model=$model"
