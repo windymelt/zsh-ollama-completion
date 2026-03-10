@@ -1,4 +1,4 @@
-name: ShellCheck
+name: Lint
 
 on:
   push:
@@ -7,14 +7,11 @@ on:
     branches: [main]
 
 jobs:
-  shellcheck:
+  zsh-syntax:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@2.0.0
-        with:
-          scandir: .
-          additional_files: "*.plugin.zsh"
-        env:
-          SHELLCHECK_OPTS: --shell=bash --severity=warning
+      - name: Install zsh
+        run: sudo apt-get update && sudo apt-get install -y zsh
+      - name: Check zsh syntax
+        run: zsh -n zsh-ollama-completion.plugin.zsh
