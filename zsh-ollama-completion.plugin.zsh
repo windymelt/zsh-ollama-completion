@@ -138,9 +138,17 @@ _ollama_clear_suggestion() {
 # widget works around this limitation.
 _ollama_render() {
     region_highlight=("${(@)region_highlight:#*fg=8*}")
-    if [[ -n "$_ollama_suggestion" ]]; then
-        POSTDISPLAY="${_ollama_suggestion}"
-        region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
+    if [[ -n "$_ollama_full_command" ]]; then
+        local display_text="${_ollama_full_command#"$BUFFER"}"
+        if [[ -n "$display_text" && "$_ollama_full_command" != "$BUFFER" ]]; then
+            _ollama_suggestion="$display_text"
+            POSTDISPLAY="${display_text}"
+            region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#display_text})) fg=8")
+        else
+            _ollama_suggestion=""
+            _ollama_full_command=""
+            POSTDISPLAY=""
+        fi
     elif [[ $_ollama_spinning -eq 1 ]]; then
         local idx=$(( (_ollama_spinner_frame % ${#_ollama_spinner_chars[@]}) + 1 ))
         local char="${_ollama_spinner_chars[$idx]}"
@@ -174,19 +182,14 @@ _ollama_handle_response() {
             # Replace newlines with spaces for single-line display
             suggestion="${suggestion//$'\n'/ }"
 
-            # Model returns the full command; compute ghost text to display
-            local display_text="${suggestion#"$BUFFER"}"
-
-            if [[ -n "$display_text" && "$suggestion" != "$BUFFER" ]]; then
+            if [[ -n "$suggestion" ]]; then
                 _ollama_debug "full command: $suggestion"
-                _ollama_debug "display text: $display_text"
                 _ollama_full_command="$suggestion"
-                _ollama_suggestion="$display_text"
             else
                 _ollama_debug "empty suggestion after processing"
-                _ollama_suggestion=""
                 _ollama_full_command=""
             fi
+            _ollama_suggestion=""
             zle _ollama_render
         fi
     fi
