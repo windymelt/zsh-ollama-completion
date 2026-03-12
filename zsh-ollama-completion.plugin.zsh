@@ -133,26 +133,35 @@ _ollama_clear_suggestion() {
     fi
 }
 
+# --- Display update widget (called from zle -F handler) ---
+# zle -F handlers cannot directly update the display; calling a user-defined
+# widget works around this limitation.
+_ollama_render() {
+    region_highlight=("${(@)region_highlight:#*fg=8*}")
+    if [[ -n "$_ollama_suggestion" ]]; then
+        POSTDISPLAY="${_ollama_suggestion}"
+        region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
+    elif [[ $_ollama_spinning -eq 1 ]]; then
+        local idx=$(( (_ollama_spinner_frame % ${#_ollama_spinner_chars[@]}) + 1 ))
+        local char="${_ollama_spinner_chars[$idx]}"
+        POSTDISPLAY=" $char"
+        region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=8")
+    else
+        POSTDISPLAY=""
+    fi
+}
+
 # --- Async response handler (zle -F callback) ---
 _ollama_handle_response() {
     local line
     if read -r line <&$1 2>/dev/null; then
         if [[ "$line" == "spin" ]]; then
-            # Update spinner display
-            _ollama_debug "spin frame=$_ollama_spinner_frame"
             _ollama_spinning=1
-            region_highlight=("${(@)region_highlight:#*fg=8*}")
-            local idx=$(( (_ollama_spinner_frame % ${#_ollama_spinner_chars[@]}) + 1 ))
-            local char="${_ollama_spinner_chars[$idx]}"
-            POSTDISPLAY=" $char"
-            region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#POSTDISPLAY})) fg=8")
-            zle -R
             (( _ollama_spinner_frame++ ))
+            zle _ollama_render
         elif [[ "$line" == "done" && -f "$_ollama_result_file" ]]; then
-            # Clear spinner state
             _ollama_spinning=0
             _ollama_spinner_frame=0
-            region_highlight=("${(@)region_highlight:#*fg=8*}")
 
             local suggestion
             suggestion=$(<"$_ollama_result_file")
@@ -172,14 +181,12 @@ _ollama_handle_response() {
                 _ollama_debug "display text: $display_text"
                 _ollama_full_command="$suggestion"
                 _ollama_suggestion="$display_text"
-                POSTDISPLAY="${_ollama_suggestion}"
-                region_highlight+=("${#BUFFER} $((${#BUFFER} + ${#_ollama_suggestion})) fg=8")
-                zle -R
             else
                 _ollama_debug "empty suggestion after processing"
-                POSTDISPLAY=""
-                zle -R
+                _ollama_suggestion=""
+                _ollama_full_command=""
             fi
+            zle _ollama_render
         fi
     fi
 }
@@ -335,7 +342,8 @@ _ollama_accept_or_forward_char() {
 
 # --- Plugin setup ---
 
-# Register widget
+# Register widgets
+zle -N _ollama_render
 zle -N _ollama_accept_or_forward_char
 
 # Bind accept key (default: Ctrl-F)
