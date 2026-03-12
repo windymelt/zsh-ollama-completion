@@ -271,7 +271,7 @@ _ollama_request_completion() {
 
         for ctx_script in "${ctx_scripts[@]}"; do
             _ollama_debug "loading context: $ctx_script"
-            ctx_output=$(zsh "$ctx_script" 2>/dev/null)
+            ctx_output=$(. "$ctx_script" 2>/dev/null)
             if [[ -n "$ctx_output" ]]; then
                 context_outputs+=("$ctx_output")
             fi
@@ -298,9 +298,8 @@ Do not add explanations or markdown. Output only the command itself."
 
         # Build context messages from provider outputs
         local context_messages=""
-        local ctx
+        local ctx escaped_ctx
         for ctx in "${context_outputs[@]}"; do
-            local escaped_ctx
             if command -v jq &>/dev/null; then
                 escaped_ctx=$(printf '%s' "$ctx" | jq -Rs .)
                 escaped_ctx="${escaped_ctx:1:-1}"
