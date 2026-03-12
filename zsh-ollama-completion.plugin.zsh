@@ -15,12 +15,16 @@
 #   ZSH_OLLAMA_TIMEOUT      - API request timeout in seconds (default: 10)
 #   ZSH_OLLAMA_THINK        - Set to 0 to disable model thinking (default: 1)
 #   ZSH_OLLAMA_DEBUG        - Set to 1 to enable debug logging to stderr (default: 0)
+#   ZSH_OLLAMA_EXTRA_CONTEXT_DIR - Path to directory with extra _context_*.zsh scripts (optional)
 #
 # Usage:
 #   export ZSH_OLLAMA_ENABLED=1
 #   source zsh-ollama-completion.plugin.zsh
 #   After 3 seconds of idle, a ghost-text suggestion appears in gray.
 #   Press Ctrl-F to accept the suggestion. Any other key dismisses it.
+
+# --- Plugin directory (resolved at source time) ---
+typeset -g _ollama_plugin_dir="${0:A:h}"
 
 # --- Internal state ---
 typeset -g _ollama_suggestion=""
@@ -223,6 +227,8 @@ _ollama_request_completion() {
 
     _ollama_debug "requesting completion: buffer='$buffer' model=$model delay=$delay"
 
+    local plugin_dir="$_ollama_plugin_dir"
+
     {
         local spinner_pid=0
         trap '[[ $spinner_pid -gt 0 ]] && kill $spinner_pid 2>/dev/null; exit 0' TERM INT HUP
@@ -240,13 +246,36 @@ _ollama_request_completion() {
         } &
         spinner_pid=$!
 
-        # Collect recent shell history
-        local history_lines
-        history_lines=$(fc -l -n -"$hist_size" 2>/dev/null)
+        # Export environment for context provider scripts
+        export _OLLAMA_CWD="$cwd"
+        export _OLLAMA_HIST_SIZE="$hist_size"
 
-        # Collect file listing of current directory
-        local file_list
-        file_list=$(ls -1 "$cwd" 2>/dev/null | head -100)
+        # Collect context from provider scripts
+        local -a context_outputs
+        local ctx_script ctx_output
+        local default_ctx_dir="${plugin_dir}/contexts"
+        local extra_ctx_dir="${ZSH_OLLAMA_EXTRA_CONTEXT_DIR:-}"
+
+        # Gather scripts from default and extra directories
+        local -a ctx_scripts
+        if [[ -d "$default_ctx_dir" ]]; then
+            for ctx_script in "$default_ctx_dir"/_context_*.zsh(N); do
+                ctx_scripts+=("$ctx_script")
+            done
+        fi
+        if [[ -n "$extra_ctx_dir" && -d "$extra_ctx_dir" ]]; then
+            for ctx_script in "$extra_ctx_dir"/_context_*.zsh(N); do
+                ctx_scripts+=("$ctx_script")
+            done
+        fi
+
+        for ctx_script in "${ctx_scripts[@]}"; do
+            _ollama_debug "loading context: $ctx_script"
+            ctx_output=$(zsh "$ctx_script" 2>/dev/null)
+            if [[ -n "$ctx_output" ]]; then
+                context_outputs+=("$ctx_output")
+            fi
+        done
 
         # Build system prompt
         local system_prompt="You are a shell command autocomplete engine. The user is in: ${cwd}
@@ -255,34 +284,38 @@ Always output the full command from the beginning, including what was already ty
 If the input contains '#', treat text after '#' as the user's intent description. Generate the complete command based on the partial command before '#' and the described intent. Do not include the '#' or the description in your output.
 Do not add explanations or markdown. Output only the command itself."
 
-        # JSON-escape all dynamic content
-        local escaped_system escaped_buffer escaped_history escaped_files
+        # JSON-escape system prompt and buffer
+        local escaped_system escaped_buffer
         if command -v jq &>/dev/null; then
             escaped_system=$(printf '%s' "$system_prompt" | jq -Rs .)
             escaped_system="${escaped_system:1:-1}"
             escaped_buffer=$(printf '%s' "$buffer" | jq -Rs .)
             escaped_buffer="${escaped_buffer:1:-1}"
-            escaped_history=$(printf '%s' "My recent shell history:
-${history_lines}" | jq -Rs .)
-            escaped_history="${escaped_history:1:-1}"
-            escaped_files=$(printf '%s' "Files in current directory:
-${file_list}" | jq -Rs .)
-            escaped_files="${escaped_files:1:-1}"
         else
             escaped_system=$(_ollama_json_escape "$system_prompt")
             escaped_buffer=$(_ollama_json_escape "$buffer")
-            escaped_history=$(_ollama_json_escape "My recent shell history:
-${history_lines}")
-            escaped_files=$(_ollama_json_escape "Files in current directory:
-${file_list}")
         fi
 
-        # Build JSON payload with few-shot examples as chat turns
+        # Build context messages from provider outputs
+        local context_messages=""
+        local ctx
+        for ctx in "${context_outputs[@]}"; do
+            local escaped_ctx
+            if command -v jq &>/dev/null; then
+                escaped_ctx=$(printf '%s' "$ctx" | jq -Rs .)
+                escaped_ctx="${escaped_ctx:1:-1}"
+            else
+                escaped_ctx=$(_ollama_json_escape "$ctx")
+            fi
+            context_messages="${context_messages}{\"role\":\"user\",\"content\":\"${escaped_ctx}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},"
+        done
+
+        # Build JSON payload with context messages and few-shot examples
         local think_param=""
         if [[ "${ZSH_OLLAMA_THINK:-1}" == "0" ]]; then
             think_param=",\"think\":false"
         fi
-        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"${escaped_files}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"ffmpeg -i video.mp4 # convert to GIF\"},{\"role\":\"assistant\",\"content\":\"ffmpeg -i video.mp4 -vf 'fps=10,scale=320:-1' -loop 0 output.gif\"},{\"role\":\"user\",\"content\":\"# show disk usage sorted by size\"},{\"role\":\"assistant\",\"content\":\"du -sh * | sort -rh\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},${context_messages}{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"ffmpeg -i video.mp4 # convert to GIF\"},{\"role\":\"assistant\",\"content\":\"ffmpeg -i video.mp4 -vf 'fps=10,scale=320:-1' -loop 0 output.gif\"},{\"role\":\"user\",\"content\":\"# show disk usage sorted by size\"},{\"role\":\"assistant\",\"content\":\"du -sh * | sort -rh\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
         local response

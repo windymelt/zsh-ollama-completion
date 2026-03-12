@@ -69,6 +69,7 @@ All configuration is done via environment variables. Set them in your `.zshrc` b
 | `ZSH_OLLAMA_ACCEPT_KEY` | `^F` | Key binding to accept suggestion |
 | `ZSH_OLLAMA_THINK` | `1` | Set to `0` to disable model thinking (faster, lower quality) |
 | `ZSH_OLLAMA_DEBUG` | `0` | Set to `1` to enable debug logging to stderr |
+| `ZSH_OLLAMA_EXTRA_CONTEXT_DIR` | _(none)_ | Path to directory with extra `_context_*.zsh` scripts |
 
 ### Example `.zshrc`
 
@@ -89,6 +90,45 @@ source /path/to/zsh-ollama-completion/zsh-ollama-completion.plugin.zsh
 5. Type anything else to dismiss it.
 
 When no suggestion is displayed, `Ctrl-F` behaves as the default `forward-char`.
+
+## Context Providers
+
+The plugin uses a context provider architecture to gather information sent to the LLM. Each provider is a small zsh script in the `contexts/` directory whose filename starts with `_context_`.
+
+### Default providers
+
+| Script | Description |
+|---|---|
+| `_context_history.zsh` | Recent shell history |
+| `_context_files.zsh` | File listing of the current directory |
+| `_context_git.zsh` | Git branch and status (only inside a git repo) |
+| `_context_os.zsh` | OS name, version, and architecture |
+
+### Custom context providers
+
+Create a directory with custom `_context_*.zsh` scripts and point `ZSH_OLLAMA_EXTRA_CONTEXT_DIR` to it:
+
+```zsh
+export ZSH_OLLAMA_EXTRA_CONTEXT_DIR="$HOME/.config/zsh-ollama-contexts"
+```
+
+Each script receives the following environment variables:
+
+- `_OLLAMA_CWD` -- the user's current working directory
+- `_OLLAMA_HIST_SIZE` -- configured history size
+
+A provider script should print its context text to stdout. If it produces no output, the context is silently skipped.
+
+Example custom provider (`_context_kubectl.zsh`):
+
+```zsh
+#!/usr/bin/env zsh
+local ctx
+ctx=$(kubectl config current-context 2>/dev/null)
+if [[ -n "$ctx" ]]; then
+    printf 'Kubernetes context: %s' "$ctx"
+fi
+```
 
 ## How It Works
 
