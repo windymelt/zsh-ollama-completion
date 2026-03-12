@@ -8,7 +8,7 @@
 #   ZSH_OLLAMA_HOST         - Ollama API URL (default: http://localhost:11434)
 #   ZSH_OLLAMA_DELAY        - Seconds of idle before triggering completion (default: 3)
 #   ZSH_OLLAMA_HISTORY_SIZE - Number of history entries for context (default: 500)
-#   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 1024)
+#   ZSH_OLLAMA_NUM_PREDICT  - Max tokens to generate (default: 4096)
 #   ZSH_OLLAMA_TEMPERATURE  - Sampling temperature (default: 0.3)
 #   ZSH_OLLAMA_ENABLED      - Set to 1 to enable (default: 0, disabled)
 #   ZSH_OLLAMA_ACCEPT_KEY   - Key binding to accept suggestion (default: ^F)
@@ -76,13 +76,6 @@ except:
         # Fallback: basic extraction without jq or python3
         printf '%s' "$json" | grep -oP '"content"\s*:\s*"\K([^"\\]|\\.)*' | head -1
     fi
-}
-
-# --- Strip <think>...</think> blocks (for models like qwen3) ---
-_ollama_strip_think() {
-    local text="$1"
-    # Use sed address range to delete all lines between <think> and </think>
-    printf '%s\n' "$text" | sed '/<think>/,/<\/think>/d'
 }
 
 # --- Initialization ---
@@ -163,9 +156,6 @@ _ollama_handle_response() {
             local suggestion
             suggestion=$(<"$_ollama_result_file")
 
-            # Strip think blocks
-            suggestion=$(_ollama_strip_think "$suggestion")
-
             # Trim leading/trailing whitespace and newlines
             suggestion="${suggestion#"${suggestion%%[! $'\n'$'\r'$'\t']*}"}"
             suggestion="${suggestion%"${suggestion##*[! $'\n'$'\r'$'\t']}"}"
@@ -207,7 +197,7 @@ _ollama_request_completion() {
     local host="${ZSH_OLLAMA_HOST:-http://localhost:11434}"
     local delay="${ZSH_OLLAMA_DELAY:-3}"
     local hist_size="${ZSH_OLLAMA_HISTORY_SIZE:-500}"
-    local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-1024}"
+    local num_predict="${ZSH_OLLAMA_NUM_PREDICT:-4096}"
     local temperature="${ZSH_OLLAMA_TEMPERATURE:-0.3}"
     local timeout="${ZSH_OLLAMA_TIMEOUT:-10}"
     local result_file="$_ollama_result_file"
@@ -218,7 +208,7 @@ _ollama_request_completion() {
 
     {
         local spinner_pid=0
-        trap 'kill $spinner_pid 2>/dev/null; exit 0' TERM INT HUP
+        trap '[[ $spinner_pid -gt 0 ]] && kill $spinner_pid 2>/dev/null; exit 0' TERM INT HUP
 
         sleep "$delay" &
         local sleep_pid=$!
@@ -247,13 +237,27 @@ Given a partial command, output the COMPLETE command that the user most likely w
 Always output the full command from the beginning, including what was already typed.
 Do not add explanations or markdown. Output only the command itself."
 
+        # JSON-escape all dynamic content
         local escaped_system escaped_buffer escaped_history escaped_files
-        escaped_system=$(_ollama_json_escape "$system_prompt")
-        escaped_buffer=$(_ollama_json_escape "$buffer")
-        escaped_history=$(_ollama_json_escape "My recent shell history:
+        if command -v jq &>/dev/null; then
+            escaped_system=$(printf '%s' "$system_prompt" | jq -Rs .)
+            escaped_system="${escaped_system:1:-1}"
+            escaped_buffer=$(printf '%s' "$buffer" | jq -Rs .)
+            escaped_buffer="${escaped_buffer:1:-1}"
+            escaped_history=$(printf '%s' "My recent shell history:
+${history_lines}" | jq -Rs .)
+            escaped_history="${escaped_history:1:-1}"
+            escaped_files=$(printf '%s' "Files in current directory:
+${file_list}" | jq -Rs .)
+            escaped_files="${escaped_files:1:-1}"
+        else
+            escaped_system=$(_ollama_json_escape "$system_prompt")
+            escaped_buffer=$(_ollama_json_escape "$buffer")
+            escaped_history=$(_ollama_json_escape "My recent shell history:
 ${history_lines}")
-        escaped_files=$(_ollama_json_escape "Files in current directory:
+            escaped_files=$(_ollama_json_escape "Files in current directory:
 ${file_list}")
+        fi
 
         # Build JSON payload with few-shot examples as chat turns
         local think_param=""
@@ -263,28 +267,36 @@ ${file_list}")
         local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"${escaped_files}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
-        _ollama_debug "calling API: ${host}/api/chat model=$model"
         local response
         response=$(curl -s --max-time "$timeout" "${host}/api/chat" -d "$payload" 2>/dev/null)
         local curl_status=$?
 
         # Stop spinner
-        kill $spinner_pid 2>/dev/null
+        [[ $spinner_pid -gt 0 ]] && kill $spinner_pid 2>/dev/null
         wait $spinner_pid 2>/dev/null
 
         if [[ $curl_status -eq 0 && -n "$response" ]]; then
+            # Extract content from response
             local content
-            content=$(_ollama_extract_content "$response")
-            _ollama_debug "API response content: $content"
+            if command -v jq &>/dev/null; then
+                content=$(printf '%s' "$response" | jq -r '.message.content // empty' 2>/dev/null)
+            elif command -v python3 &>/dev/null; then
+                content=$(printf '%s' "$response" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+    print(d.get('message', {}).get('content', ''), end='')
+except:
+    pass
+" 2>/dev/null)
+            else
+                content=$(printf '%s' "$response" | grep -oP '"content"\s*:\s*"\K([^"\\]|\\.)*' | head -1)
+            fi
 
             if [[ -n "$content" ]]; then
                 printf '%s' "$content" > "$result_file"
                 echo "done" >&$fd 2>/dev/null
-            else
-                _ollama_debug "API returned empty content"
             fi
-        else
-            _ollama_debug "API call failed or returned empty response"
         fi
     } &!
 
