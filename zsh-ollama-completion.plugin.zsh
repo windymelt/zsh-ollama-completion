@@ -139,7 +139,12 @@ _ollama_clear_suggestion() {
 _ollama_render() {
     region_highlight=("${(@)region_highlight:#*fg=8*}")
     if [[ -n "$_ollama_full_command" ]]; then
-        local display_text="${_ollama_full_command#"$BUFFER"}"
+        # When buffer contains '#', strip only the command prefix (before '#')
+        local cmd_prefix="$BUFFER"
+        if [[ "$BUFFER" == *"#"* ]]; then
+            cmd_prefix="${BUFFER%%#*}"
+        fi
+        local display_text="${_ollama_full_command#"$cmd_prefix"}"
         if [[ -n "$display_text" && "$_ollama_full_command" != "$BUFFER" ]]; then
             _ollama_suggestion="$display_text"
             POSTDISPLAY="${display_text}"
@@ -247,6 +252,7 @@ _ollama_request_completion() {
         local system_prompt="You are a shell command autocomplete engine. The user is in: ${cwd}
 Given a partial command, output the COMPLETE command that the user most likely wants to run.
 Always output the full command from the beginning, including what was already typed.
+If the input contains '#', treat text after '#' as the user's intent description. Generate the complete command based on the partial command before '#' and the described intent. Do not include the '#' or the description in your output.
 Do not add explanations or markdown. Output only the command itself."
 
         # JSON-escape all dynamic content
@@ -276,7 +282,7 @@ ${file_list}")
         if [[ "${ZSH_OLLAMA_THINK:-1}" == "0" ]]; then
             think_param=",\"think\":false"
         fi
-        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"${escaped_files}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
+        local payload="{\"model\":\"${model}\",\"messages\":[{\"role\":\"system\",\"content\":\"${escaped_system}\"},{\"role\":\"user\",\"content\":\"${escaped_history}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"${escaped_files}\"},{\"role\":\"assistant\",\"content\":\"Understood.\"},{\"role\":\"user\",\"content\":\"git comm\"},{\"role\":\"assistant\",\"content\":\"git commit\"},{\"role\":\"user\",\"content\":\"ls -\"},{\"role\":\"assistant\",\"content\":\"ls -la\"},{\"role\":\"user\",\"content\":\"docker compo\"},{\"role\":\"assistant\",\"content\":\"docker compose up -d\"},{\"role\":\"user\",\"content\":\"ffmpeg -i video.mp4 # convert to GIF\"},{\"role\":\"assistant\",\"content\":\"ffmpeg -i video.mp4 -vf 'fps=10,scale=320:-1' -loop 0 output.gif\"},{\"role\":\"user\",\"content\":\"# show disk usage sorted by size\"},{\"role\":\"assistant\",\"content\":\"du -sh * | sort -rh\"},{\"role\":\"user\",\"content\":\"${escaped_buffer}\"}],\"stream\":false${think_param},\"options\":{\"num_predict\":${num_predict},\"temperature\":${temperature}}}"
 
         # Call Ollama API
         local response
