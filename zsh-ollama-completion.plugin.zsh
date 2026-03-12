@@ -149,6 +149,7 @@ _ollama_render() {
     else
         POSTDISPLAY=""
     fi
+    zle -R
 }
 
 # --- Async response handler (zle -F callback) ---
