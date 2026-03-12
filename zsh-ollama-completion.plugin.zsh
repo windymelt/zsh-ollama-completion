@@ -141,8 +141,8 @@ _ollama_render() {
     if [[ -n "$_ollama_full_command" ]]; then
         # When buffer contains '#', strip only the command prefix (before '#')
         local cmd_prefix="$BUFFER"
-        if [[ "$BUFFER" == *"#"* ]]; then
-            cmd_prefix="${BUFFER%%#*}"
+        if [[ "$BUFFER" == *\#* ]]; then
+            cmd_prefix="${BUFFER%%\#*}"
         fi
         local display_text="${_ollama_full_command#"$cmd_prefix"}"
         if [[ -n "$display_text" && "$_ollama_full_command" != "$BUFFER" ]]; then
