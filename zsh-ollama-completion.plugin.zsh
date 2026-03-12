@@ -139,6 +139,7 @@ _ollama_handle_response() {
     if read -r line <&$1 2>/dev/null; then
         if [[ "$line" == "spin" ]]; then
             # Update spinner display
+            _ollama_debug "spin frame=$_ollama_spinner_frame"
             _ollama_spinning=1
             region_highlight=("${(@)region_highlight:#*fg=8*}")
             local idx=$(( (_ollama_spinner_frame % ${#_ollama_spinner_chars[@]}) + 1 ))
